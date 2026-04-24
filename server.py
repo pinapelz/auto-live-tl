@@ -4,12 +4,13 @@ import json
 import queue
 import os
 from typing import Any, Dict, Optional, Set, List, Iterator
-from flask import Flask, Response, stream_with_context
+from flask import Flask
 from flask_cors import CORS
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 from gui import select_settings, prompt_input_sample_rate
+from routes import register_routes
 
 TARGET_SAMPLE_RATE: int = 16000
 CAPTURE_SAMPLE_RATE: int = 0
@@ -143,24 +144,9 @@ def event_stream() -> Iterator[str]:
             clients.discard(client_queue)
 
 
-@app.get("/events")
-def events() -> Response:
-    headers = {
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "Access-Control-Allow-Origin": "*",
-    }
-    return Response(stream_with_context(event_stream()), mimetype="text/event-stream", headers=headers)
-
-
-@app.get("/health")
-def health() -> Response:
-    response = Response("ok", mimetype="text/plain")
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    return response
-
-
 def start_subtitle_server() -> threading.Thread:
+    register_routes(app, event_stream)
+
     thread = threading.Thread(
         target=lambda: app.run(
             host=SERVER_HOST,
