@@ -192,6 +192,13 @@ def audio_callback(indata, frames, time_info, status):
             audio_buffer = audio_buffer[-MAX_SAMPLES:]
 
 
+def is_silent(audio_16k):
+    if audio_16k is None or len(audio_16k) == 0:
+        return False
+    rms = float(np.sqrt(np.mean(np.square(audio_16k)))) # root mean square
+    return rms < 0.003
+
+
 def processing_loop():
     while True:
         time.sleep(PROCESS_INTERVAL_SECONDS)
@@ -201,6 +208,8 @@ def processing_loop():
             audio_copy = audio_buffer.copy()
             capture_rate = CAPTURE_SAMPLE_RATE
         audio_16k = resample_audio(audio_copy, capture_rate, TARGET_SAMPLE_RATE)
+        if is_silent(audio_16k):
+            continue
         run_whisper(audio_16k)
 
 
