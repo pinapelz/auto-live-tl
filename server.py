@@ -78,6 +78,9 @@ _raw_batch: List[str] = []
 _raw_batch_lock: threading.Lock = threading.Lock()
 
 def resample_audio(audio_np: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """
+    Resamples audio to TARGET_SAMPLE_RATE (default is 16000hz), speeds up inference time, fetched as a nd array
+    """
     if src_rate == dst_rate:
         return audio_np
     if len(audio_np) == 0:
@@ -140,6 +143,9 @@ def cleanup_subtitle_with_ollama(raw_text: str, context: List[str]) -> Optional[
 
 
 def ensure_ollama_ready() -> None:
+    """
+    Pulls Ollama model is necessary, checks model is downloaded
+    """
     try:
         local = _ollama.list()
     except Exception as exc:
@@ -180,6 +186,13 @@ def normalize_llm_output(text: str) -> str:
 
 
 def is_hallucination(text: str) -> bool:
+    """
+    Algorithmic hallucination detection by checking if the output from whisper is unusually long
+    given sliding window length, or if there are too many repeating words/phrases
+
+    False-alarms generally do not impact quality since the same information is likely captured in the
+    previous subtitle
+    """
     words = text.split()
     if not words:
         return False
@@ -189,7 +202,7 @@ def is_hallucination(text: str) -> bool:
         return True
     clean = [re.sub(r"[^\w']+", "", w).lower() for w in words]
     clean = [w for w in clean if w]
-    for n in (2, 3):
+    for n in [2, 3]:
         if len(clean) < n * 3:
             continue
         ngrams = [" ".join(clean[i : i + n]) for i in range(len(clean) - n + 1)]
@@ -286,6 +299,9 @@ def broadcast_subtitle(text: str) -> None:
 
 
 def format_sse_event(event: str, payload: Dict[str, Any]) -> str:
+    """
+    Creates an SSE event raw payload
+    """
     data = json.dumps(payload)
     return f"event: {event}\ndata: {data}\n\n"
 
@@ -312,6 +328,9 @@ def event_stream() -> Iterator[str]:
 
 
 def start_subtitle_server() -> threading.Thread:
+    """
+    Run flask app to expose processed data as a server-sent-events (subtitle)
+    """
     register_routes(app, event_stream)
 
     thread = threading.Thread(
@@ -329,6 +348,9 @@ def start_subtitle_server() -> threading.Thread:
 
 
 def list_audio_devices() -> None:
+    """
+    Get all audio devices
+    """
     devices = sd.query_devices()
     print("Available audio devices:")
     for idx, dev in enumerate(devices):
@@ -342,6 +364,9 @@ def list_audio_devices() -> None:
 
 
 def audio_callback(indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
+    """
+    Callback definition for audio sink. Unload all data into global audio_buffer
+    """
     if status:
         print(f"Audio status: {status}")
     # Take first channel
@@ -355,6 +380,9 @@ def audio_callback(indata: np.ndarray, frames: int, time_info: Any, status: Any)
 
 
 def is_silent(audio_16k: Optional[np.ndarray]) -> bool:
+    """
+    Basic rudimentary silence detection, do not run whisper if rms value isn't reached
+    """
     if audio_16k is None or len(audio_16k) == 0:
         return False
     rms: float = float(np.sqrt(np.mean(np.square(audio_16k))))  # root mean square
@@ -362,6 +390,10 @@ def is_silent(audio_16k: Optional[np.ndarray]) -> bool:
 
 
 def processing_loop() -> None:
+    """
+    Core logic for processing incoming data
+    Capture Audio -> If not silent -> Run Whisper on audio buffer
+    """
     while True:
         time.sleep(PROCESS_INTERVAL_SECONDS)
         with lock:
@@ -376,6 +408,9 @@ def processing_loop() -> None:
 
 
 def select_input_sample_rate(device_index: int, preferred_rate: int) -> int:
+    """
+    Attempts to automatically identify the sample rate of audio sink. Otherwise prompt for input
+    """
     common_rates: List[int] = [48000, 44100, 32000, 24000, 22050, 16000, 12000, 8000]
     tried: Set[int] = set()
     for rate in [preferred_rate] + common_rates:
