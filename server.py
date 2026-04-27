@@ -203,8 +203,10 @@ def is_hallucination(text: str) -> bool:
         ngrams = [" ".join(clean[i : i + n]) for i in range(len(clean) - n + 1)]
         top, count = Counter(ngrams).most_common(1)[0]
         if count >= 3:
-            print(f"🔴 Hallucination (\'{top}\' x{count}): {text[:60]!r}")
-            return True
+            tokens_covered = count * n
+            if tokens_covered / max(1, len(clean)) > 0.35:
+                print(f"🔴 Hallucination (\'{top}\' x{count}, covers {tokens_covered}/{len(clean)} tokens): {text[:60]!r}")
+                return True
     top, count = Counter(clean).most_common(1)[0]
     if count >= 4 and count / len(clean) > 0.40:
         print(f"🔴 Hallucination (\'{top}\' x{count}, {count/len(clean):.0%}): {text[:60]!r}")
