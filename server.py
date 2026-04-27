@@ -16,7 +16,7 @@ import sounddevice as sd
 from faster_whisper import WhisperModel
 from gui import select_settings, prompt_input_sample_rate
 from routes import register_routes
-from config import _SYSTEM_PROMPT
+from config import _SYSTEM_PROMPT, _LLM_EMPTY_SENTINELS, _HALLUCINATION_PHRASES
 
 TARGET_SAMPLE_RATE: int = 16000
 CAPTURE_SAMPLE_RATE: int = 0
@@ -47,7 +47,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "use_ollama_cleanup": True,
     "ollama_device": "GPU",
     "ollama_context_window": 5,
-    "ollama_raw_batch_size": 2,
+    "ollama_raw_batch_size": 1,
 }
 
 MODEL_CHOICES: List[str] = ["tiny", "base", "small", "medium", "large-v2", "large-v3", "distil-large-v3"]
@@ -173,11 +173,6 @@ def ensure_ollama_ready() -> None:
     except Exception as exc:
         raise RuntimeError(f"Ollama warm-up failed: {exc}") from exc
 
-_LLM_EMPTY_SENTINELS: frozenset = frozenset({
-    "empty string", "empty", "(empty)", "[empty]",
-    "(empty string)", "[empty string]", "(none)", "none", "n/a",
-})
-
 
 def normalize_llm_output(text: str) -> str:
     if text.strip().lower().rstrip(".") in _LLM_EMPTY_SENTINELS:
@@ -214,6 +209,12 @@ def is_hallucination(text: str) -> bool:
     if count >= 4 and count / len(clean) > 0.40:
         print(f"🔴 Hallucination (\'{top}\' x{count}, {count/len(clean):.0%}): {text[:60]!r}")
         return True
+
+    normalized = re.sub(r"[^\w\s]", "", text.lower()).strip()
+    if normalized in _HALLUCINATION_PHRASES:
+        print(f"🔴 Hallucination (blocked phrase): {text!r}")
+        return True
+
     return False
 
 

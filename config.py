@@ -22,3 +22,37 @@ _SYSTEM_PROMPT: str = (
     "     output an empty string and nothing else.\n"
     "  7. Output ONLY the final subtitle text. No labels, no explanations."
 )
+
+_LLM_EMPTY_SENTINELS: frozenset = frozenset({
+    "empty string", "empty", "(empty)", "[empty]",
+    "(empty string)", "[empty string]", "(none)", "none", "n/a",
+})
+
+_HALLUCINATION_PHRASES: frozenset = frozenset({
+    "empty string",
+    "thank you for watching",
+    "thanks for watching",
+    "thank you for watching this video",
+    "thanks for watching this video",
+    "thank you for watching and ill see you next time",
+    "thank you for watching ill see you in the next video",
+    "thanks for watching ill see you next time",
+    "thank you so much for watching",
+    "thanks for watching and ill see you in the next one",
+    "see you next time",
+    "see you in the next video",
+    "ill see you in the next video",
+    "ill see you next time",
+    "see you later",
+    "bye bye",
+    "please subscribe",
+    "like and subscribe",
+    "dont forget to like and subscribe",
+    "please like and subscribe",
+    "subscribe to my channel",
+    "if you enjoyed this video please like and subscribe",
+    "you",
+    "uh",
+    "um",
+    "hmm",
+})
