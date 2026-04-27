@@ -3,7 +3,6 @@ A basic LOCAL translation backend that listens to an audio sink via PCM and runs
 
 Translations and trascriptions are transformers based, inaccuracies and hallucinations will occur.
 
-
 # Setup
 > It's highly recommended that you run this with a GPU, running with CPU is possible but inference will be very slow outside of using tiny models (which compromise accuracy)
 >
@@ -91,3 +90,20 @@ for event in client.events():
         import json
         print(json.loads(event.data)["text"])
 ```
+
+
+## Demo
+Ran using faster-whisper medium and qwen2.5-7B-instruct on RTX 3060 Mobile (CUDA)
+
+Example 1:
+
+https://github.com/user-attachments/assets/db602a11-2d13-4e58-a5e8-1d4a71c1be0e
+
+
+Example 2:
+
+https://github.com/user-attachments/assets/a480809e-77f7-4b66-9686-aa2ffea8333d
+
+
+
+
