@@ -155,6 +155,9 @@ class _SettingsDialog(QDialog):
         ollama_advanced_layout = QFormLayout(ollama_advanced_group)
         ollama_advanced_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
 
+        self.ollama_model_edit = QLineEdit(str(get_value("ollama_model", "qwen2.5:7b-instruct")), ollama_tab)
+        ollama_advanced_layout.addRow(QLabel("Ollama model:"), self.ollama_model_edit)
+
         self.ollama_context_edit = QLineEdit(str(get_value("ollama_context_window", 6)), ollama_tab)
         ollama_advanced_layout.addRow(QLabel("Context window (segments):"), self.ollama_context_edit)
 
@@ -240,6 +243,7 @@ class _SettingsDialog(QDialog):
             "update_interval_seconds": update_interval_seconds,
             "use_ollama_cleanup": self.use_ollama_cleanup_checkbox.isChecked(),
             "ollama_device": self.ollama_device_combo.currentText(),
+            "ollama_model": self.ollama_model_edit.text().strip(),
             "ollama_context_window": ollama_context_window,
             "ollama_raw_batch_size": ollama_raw_batch_size,
         }

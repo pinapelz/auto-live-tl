@@ -46,6 +46,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "update_interval_seconds": 2,
     "use_ollama_cleanup": True,
     "ollama_device": "GPU",
+    "ollama_model": "qwen2.5:7b-instruct",
     "ollama_context_window": 5,
     "ollama_raw_batch_size": 1,
 }
@@ -431,7 +432,7 @@ def select_input_sample_rate(device_index: int, preferred_rate: int) -> int:
 def main() -> None:
     global CAPTURE_SAMPLE_RATE, MAX_SAMPLES, model, WHISPER_TASK, WHISPER_BEAM_SIZE, WHISPER_LANGUAGE
     global BUFFER_SECONDS, PROCESS_INTERVAL_SECONDS, USE_OLLAMA_CLEANUP
-    global OLLAMA_CONTEXT_WINDOW, RAW_BATCH_SIZE, subtitle_context
+    global OLLAMA_MODEL, OLLAMA_CONTEXT_WINDOW, RAW_BATCH_SIZE, subtitle_context
     start_subtitle_server()
 
     settings: Dict[str, Any] = load_settings()
@@ -450,6 +451,7 @@ def main() -> None:
 
     USE_OLLAMA_CLEANUP = bool(settings.get("use_ollama_cleanup", True))
     OLLAMA_OPTIONS["num_gpu"] = 0 if settings.get("ollama_device", "CPU").upper() == "CPU" else 1
+    OLLAMA_MODEL = "qwen2.5:7b-instruct" if str(settings.get("ollama_model", OLLAMA_MODEL)) is None else str(settings.get("ollama_model", OLLAMA_MODEL))
     OLLAMA_CONTEXT_WINDOW = int(settings.get("ollama_context_window", 6))
     subtitle_context = deque(maxlen=OLLAMA_CONTEXT_WINDOW)
     RAW_BATCH_SIZE = int(settings.get("ollama_raw_batch_size", 3))
