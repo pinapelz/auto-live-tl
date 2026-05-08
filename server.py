@@ -14,7 +14,7 @@ from ollama import ChatResponse
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
-from gui import select_settings, prompt_input_sample_rate
+from gui import select_settings, prompt_input_sample_rate, run_runtime_dashboard
 from routes import register_routes
 from config import _SYSTEM_PROMPT, _LLM_EMPTY_SENTINELS, _HALLUCINATION_PHRASES
 
@@ -24,7 +24,10 @@ BUFFER_SECONDS: float = 10
 MAX_SAMPLES: int = 0
 PROCESS_INTERVAL_SECONDS: float = 2
 SSE_EVENT_SUBTITLE: str = "subtitle"
+SSE_EVENT_AUDIO_ACTIVITY: str = "audio_activity"
 SSE_KEEPALIVE_SECONDS: int = 15
+RUNTIME_SUBTITLE_LINES_MAX: int = 120
+RUNTIME_LOG_LINES_MAX: int = 300
 
 USE_OLLAMA_CLEANUP: bool = True
 OLLAMA_MODEL: str = "qwen2.5:7b-instruct"
@@ -44,6 +47,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "language": "",
     "context_seconds": 10,
     "update_interval_seconds": 2,
+    "audio_activity_threshold": 0.003,
     "use_ollama_cleanup": True,
     "ollama_device": "GPU",
     "ollama_model": "qwen2.5:7b-instruct",
@@ -62,8 +66,23 @@ model: Optional[WhisperModel] = None
 WHISPER_TASK: str = DEFAULT_SETTINGS["task"]
 WHISPER_BEAM_SIZE: int = DEFAULT_SETTINGS["beam_size"]
 WHISPER_LANGUAGE: str = DEFAULT_SETTINGS["language"]
+AUDIO_ACTIVITY_THRESHOLD: float = float(DEFAULT_SETTINGS["audio_activity_threshold"])
+AUDIO_ACTIVITY_HOLD_SECONDS: float = 0.75
+AUDIO_ACTIVITY_REPORT_INTERVAL_SECONDS: float = 0.5
 
-last_payload: Optional[Dict[str, Any]] = None
+last_subtitle_payload: Optional[Dict[str, Any]] = None
+last_audio_activity_payload: Dict[str, Any] = {
+    "active": False,
+    "rms": 0.0,
+    "threshold": AUDIO_ACTIVITY_THRESHOLD,
+}
+_audio_active_until: float = 0.0
+_audio_last_emit: float = 0.0
+_audio_state_lock: threading.Lock = threading.Lock()
+recent_subtitle_lines: Deque[str] = deque(maxlen=RUNTIME_SUBTITLE_LINES_MAX)
+recent_subtitle_lines_lock: threading.Lock = threading.Lock()
+runtime_logs: Deque[str] = deque(maxlen=RUNTIME_LOG_LINES_MAX)
+runtime_logs_lock: threading.Lock = threading.Lock()
 clients: Set[queue.Queue] = set()
 clients_lock: threading.Lock = threading.Lock()
 SERVER_HOST: str = "127.0.0.1"
@@ -181,7 +200,14 @@ def normalize_llm_output(text: str) -> str:
     return text
 
 
-def is_hallucination(text: str) -> bool:
+def add_runtime_log(kind: str, message: str) -> None:
+    timestamp = time.strftime("%H:%M:%S")
+    line = f"[{timestamp}] [{kind.upper()}] {message}"
+    with runtime_logs_lock:
+        runtime_logs.append(line)
+
+
+def is_hallucination(text: str) -> Optional[str]:
     """
     Algorithmic hallucination detection by checking if the output from whisper is unusually long
     given sliding window length, or if there are too many repeating words/phrases
@@ -191,11 +217,10 @@ def is_hallucination(text: str) -> bool:
     """
     words = text.split()
     if not words:
-        return False
+        return None
     max_expected = int(BUFFER_SECONDS * 4.5)
     if len(words) > max_expected:
-        print(f"🔴 Hallucination (too long: {len(words)} words > {max_expected}): {text[:60]!r}")
-        return True
+        return f"too long: {len(words)} words > {max_expected}"
     clean = [re.sub(r"[^\w']+", "", w).lower() for w in words]
     clean = [w for w in clean if w]
     for n in [2, 3]:
@@ -206,19 +231,16 @@ def is_hallucination(text: str) -> bool:
         if count >= 3:
             tokens_covered = count * n
             if tokens_covered / max(1, len(clean)) > 0.35:
-                print(f"🔴 Hallucination (\'{top}\' x{count}, covers {tokens_covered}/{len(clean)} tokens): {text[:60]!r}")
-                return True
+                return f"repeating phrase '{top}' x{count} (covers {tokens_covered}/{len(clean)} tokens)"
     top, count = Counter(clean).most_common(1)[0]
     if count >= 4 and count / len(clean) > 0.40:
-        print(f"🔴 Hallucination (\'{top}\' x{count}, {count/len(clean):.0%}): {text[:60]!r}")
-        return True
+        return f"repeating token '{top}' x{count} ({count/len(clean):.0%})"
 
     normalized = re.sub(r"[^\w\s]", "", text.lower()).strip()
     if normalized in _HALLUCINATION_PHRASES:
-        print(f"🔴 Hallucination (blocked phrase): {text!r}")
-        return True
+        return "blocked phrase pattern"
 
-    return False
+    return None
 
 
 def llm_processing_loop() -> None:
@@ -235,6 +257,7 @@ def llm_processing_loop() -> None:
         cleaned: Optional[str] = cleanup_subtitle_with_ollama(raw_text, context)
 
         if cleaned is None:
+            add_runtime_log("LLM", "cleanup failed, falling back to raw text")
             cleaned = raw_text
         else:
             cleaned = normalize_llm_output(cleaned)
@@ -242,10 +265,10 @@ def llm_processing_loop() -> None:
         if cleaned:
             with subtitle_context_lock:
                 subtitle_context.append(cleaned)
-            print(f"🔵 (cleaned) {cleaned}")
+            add_runtime_log("FINAL", cleaned)
             broadcast_subtitle(cleaned)
         else:
-            print("🟡 (LLM: no new content)")
+            add_runtime_log("LLM", "no new content from cleanup")
 
 
 def run_whisper(audio_np: np.ndarray) -> str:
@@ -258,9 +281,11 @@ def run_whisper(audio_np: np.ndarray) -> str:
     if not text:
         return text
 
-    print(f"🟢 (raw) {text}")
+    add_runtime_log("RAW", text)
 
-    if is_hallucination(text):
+    hallucination_reason = is_hallucination(text)
+    if hallucination_reason:
+        add_runtime_log("HALLUCINATION", f"{hallucination_reason} | text={text}")
         return text
 
     if USE_OLLAMA_CLEANUP:
@@ -272,9 +297,11 @@ def run_whisper(audio_np: np.ndarray) -> str:
             else:
                 batch_text = None
         if batch_text is not None:
+            add_runtime_log("RAW->LLM", batch_text.replace("\n", " || "))
             try:
                 llm_input_queue.put_nowait(batch_text)
             except queue.Full:
+                add_runtime_log("LLM", "queue full, dropping previous batch")
                 try:
                     llm_input_queue.get_nowait()
                 except queue.Empty:
@@ -282,24 +309,48 @@ def run_whisper(audio_np: np.ndarray) -> str:
                 try:
                     llm_input_queue.put_nowait(batch_text)
                 except queue.Full:
-                    pass
+                    add_runtime_log("LLM", "queue still full, skipped batch")
     else:
+        add_runtime_log("FINAL", text)
         broadcast_subtitle(text)
 
     return text
 
 
-def broadcast_subtitle(text: str) -> None:
-    global last_payload
-    payload: Dict[str, Any] = {"text": text}
-    last_payload = payload
+def broadcast_event(event: str, payload: Dict[str, Any]) -> None:
+    message: Dict[str, Any] = {"event": event, "payload": payload}
     with clients_lock:
         targets = list(clients)
     for client_queue in targets:
         try:
-            client_queue.put_nowait(payload)
+            client_queue.put_nowait(message)
         except queue.Full:
             pass
+
+
+def broadcast_subtitle(text: str) -> None:
+    global last_subtitle_payload
+    payload: Dict[str, Any] = {"text": text}
+    last_subtitle_payload = payload
+    with recent_subtitle_lines_lock:
+        if not recent_subtitle_lines or recent_subtitle_lines[-1] != text:
+            recent_subtitle_lines.append(text)
+    broadcast_event(SSE_EVENT_SUBTITLE, payload)
+
+
+def get_audio_activity_snapshot() -> Dict[str, Any]:
+    with _audio_state_lock:
+        return dict(last_audio_activity_payload)
+
+
+def get_recent_subtitle_lines_snapshot() -> List[str]:
+    with recent_subtitle_lines_lock:
+        return list(recent_subtitle_lines)
+
+
+def get_runtime_logs_snapshot() -> List[str]:
+    with runtime_logs_lock:
+        return list(runtime_logs)
 
 
 def format_sse_event(event: str, payload: Dict[str, Any]) -> str:
@@ -311,21 +362,28 @@ def format_sse_event(event: str, payload: Dict[str, Any]) -> str:
 
 
 def event_stream() -> Iterator[str]:
-    client_queue: queue.Queue = queue.Queue(maxsize=10)
+    client_queue: queue.Queue = queue.Queue(maxsize=20)
     with clients_lock:
         clients.add(client_queue)
 
-    if last_payload:
-        yield format_sse_event(SSE_EVENT_SUBTITLE, last_payload)
+    if last_subtitle_payload:
+        yield format_sse_event(SSE_EVENT_SUBTITLE, last_subtitle_payload)
+    yield format_sse_event(SSE_EVENT_AUDIO_ACTIVITY, last_audio_activity_payload)
 
     try:
         while True:
             try:
-                payload_data = client_queue.get(timeout=SSE_KEEPALIVE_SECONDS)
+                event_data = client_queue.get(timeout=SSE_KEEPALIVE_SECONDS)
             except queue.Empty:
                 yield ": keep-alive\n\n"
                 continue
-            yield format_sse_event(SSE_EVENT_SUBTITLE, payload_data)
+            if not isinstance(event_data, dict):
+                continue
+            event_name = str(event_data.get("event", SSE_EVENT_SUBTITLE))
+            payload = event_data.get("payload", {})
+            if not isinstance(payload, dict):
+                payload = {}
+            yield format_sse_event(event_name, payload)
     finally:
         with clients_lock:
             clients.discard(client_queue)
@@ -367,6 +425,33 @@ def list_audio_devices() -> None:
         print(f"[{idx}] {dev['name']} ({io_str})")
 
 
+def publish_audio_activity(chunk_rms: float) -> None:
+    global _audio_active_until, _audio_last_emit, last_audio_activity_payload
+
+    now_mono = time.monotonic()
+    if chunk_rms >= AUDIO_ACTIVITY_THRESHOLD:
+        _audio_active_until = now_mono + AUDIO_ACTIVITY_HOLD_SECONDS
+
+    with _audio_state_lock:
+        active = now_mono <= _audio_active_until
+        previous_active = bool(last_audio_activity_payload.get("active", False))
+        state_changed = active != previous_active
+        report_due = (now_mono - _audio_last_emit) >= AUDIO_ACTIVITY_REPORT_INTERVAL_SECONDS
+
+        if not state_changed and not report_due:
+            return
+
+        payload: Dict[str, Any] = {
+            "active": active,
+            "rms": round(chunk_rms, 6),
+            "threshold": AUDIO_ACTIVITY_THRESHOLD,
+        }
+        last_audio_activity_payload = payload
+        _audio_last_emit = now_mono
+
+    broadcast_event(SSE_EVENT_AUDIO_ACTIVITY, payload)
+
+
 def audio_callback(indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
     """
     Callback definition for audio sink. Unload all data into global audio_buffer
@@ -375,6 +460,8 @@ def audio_callback(indata: np.ndarray, frames: int, time_info: Any, status: Any)
         print(f"Audio status: {status}")
     # Take first channel
     chunk: np.ndarray = indata[:, 0].copy()
+    chunk_rms: float = float(np.sqrt(np.mean(np.square(chunk)))) if len(chunk) > 0 else 0.0
+    publish_audio_activity(chunk_rms)
 
     global audio_buffer
     with lock:
@@ -390,7 +477,7 @@ def is_silent(audio_16k: Optional[np.ndarray]) -> bool:
     if audio_16k is None or len(audio_16k) == 0:
         return False
     rms: float = float(np.sqrt(np.mean(np.square(audio_16k))))  # root mean square
-    return rms < 0.003
+    return rms < AUDIO_ACTIVITY_THRESHOLD
 
 
 def processing_loop() -> None:
@@ -433,6 +520,7 @@ def main() -> None:
     global CAPTURE_SAMPLE_RATE, MAX_SAMPLES, model, WHISPER_TASK, WHISPER_BEAM_SIZE, WHISPER_LANGUAGE
     global BUFFER_SECONDS, PROCESS_INTERVAL_SECONDS, USE_OLLAMA_CLEANUP
     global OLLAMA_MODEL, OLLAMA_CONTEXT_WINDOW, RAW_BATCH_SIZE, subtitle_context
+    global AUDIO_ACTIVITY_THRESHOLD, last_audio_activity_payload, _audio_active_until, _audio_last_emit
     start_subtitle_server()
 
     settings: Dict[str, Any] = load_settings()
@@ -478,10 +566,22 @@ def main() -> None:
     WHISPER_LANGUAGE = settings["language"].strip() if settings["language"] else ""
     BUFFER_SECONDS = float(settings.get("context_seconds", BUFFER_SECONDS))
     PROCESS_INTERVAL_SECONDS = float(settings.get("update_interval_seconds", PROCESS_INTERVAL_SECONDS))
+    AUDIO_ACTIVITY_THRESHOLD = float(settings.get("audio_activity_threshold", AUDIO_ACTIVITY_THRESHOLD))
     if BUFFER_SECONDS <= 0:
         BUFFER_SECONDS = DEFAULT_SETTINGS["context_seconds"]
     if PROCESS_INTERVAL_SECONDS <= 0:
         PROCESS_INTERVAL_SECONDS = DEFAULT_SETTINGS["update_interval_seconds"]
+    if AUDIO_ACTIVITY_THRESHOLD <= 0:
+        AUDIO_ACTIVITY_THRESHOLD = float(DEFAULT_SETTINGS["audio_activity_threshold"])
+
+    last_audio_activity_payload = {
+        "active": False,
+        "rms": 0.0,
+        "threshold": AUDIO_ACTIVITY_THRESHOLD,
+    }
+    _audio_active_until = 0.0
+    _audio_last_emit = 0.0
+    broadcast_event(SSE_EVENT_AUDIO_ACTIVITY, last_audio_activity_payload)
 
     model = WhisperModel(model_name, device=whisper_device, compute_type=compute_type)
 
@@ -495,24 +595,51 @@ def main() -> None:
     print(f"Model: {model_name} | task={WHISPER_TASK} | beam_size={WHISPER_BEAM_SIZE}")
     print(f"Compute: device={whisper_device} | compute_type={compute_type}")
     print(f"Capture sample rate: {CAPTURE_SAMPLE_RATE} Hz (resampling to {TARGET_SAMPLE_RATE} Hz)")
+    print(f"Audio activity threshold (RMS): {AUDIO_ACTIVITY_THRESHOLD}")
     print(f"Ollama cleanup: {'enabled' if USE_OLLAMA_CLEANUP else 'disabled'} (model={OLLAMA_MODEL})")
 
     processing_thread = threading.Thread(target=processing_loop, daemon=True)
     processing_thread.start()
-    with sd.InputStream(
+
+    with recent_subtitle_lines_lock:
+        recent_subtitle_lines.clear()
+    with runtime_logs_lock:
+        runtime_logs.clear()
+
+    add_runtime_log("SYSTEM", "Runtime dashboard started")
+    add_runtime_log("SYSTEM", f"Device: {device_info['name']} @ {CAPTURE_SAMPLE_RATE} Hz")
+    add_runtime_log("SYSTEM", f"Task={WHISPER_TASK} | Beam={WHISPER_BEAM_SIZE} | Cleanup={'on' if USE_OLLAMA_CLEANUP else 'off'}")
+
+    stream = sd.InputStream(
         device=device_index,
         channels=1,
         samplerate=CAPTURE_SAMPLE_RATE,
         dtype="float32",
         callback=audio_callback,
         blocksize=int(CAPTURE_SAMPLE_RATE * 0.5),
-    ):
-        print("Listening... Press Ctrl+C to stop.")
+    )
+
+    def _on_dashboard_close() -> None:
+        print("Stopping.")
+
+    try:
+        stream.start()
+        print("Listening... Close the runtime window to stop.")
+        run_runtime_dashboard(
+            get_audio_activity=get_audio_activity_snapshot,
+            get_runtime_logs=get_runtime_logs_snapshot,
+            get_subtitle_lines=get_recent_subtitle_lines_snapshot,
+            on_close=_on_dashboard_close,
+        )
+    finally:
         try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("Stopping.")
+            stream.stop()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
