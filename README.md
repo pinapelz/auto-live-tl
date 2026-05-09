@@ -16,6 +16,14 @@ A GUI is available for configuration
 
 `server.py` serves a backend for translating incoming audio data. It expects some other client to hit the `/events` endpoint to fetch the translated data.
 
+## Translation backends
+
+You can now choose between two subtitle backends in the settings dialog:
+
+- **Whisper + optional Ollama cleanup**
+- **OpenAI Realtime translation** using `gpt-realtime-translate` (requires OpenAI API Key, billed usage)
+  - This bypasses `faster-whisper` and `ollama`, in this use case auto-live-tl only serves to encode PCM data into the appropriate format for `gpt-realtime-translate`
+
 
 # Clients:
 
@@ -103,7 +111,3 @@ https://github.com/user-attachments/assets/db602a11-2d13-4e58-a5e8-1d4a71c1be0e
 Example 2:
 
 https://github.com/user-attachments/assets/a480809e-77f7-4b66-9686-aa2ffea8333d
-
-
-
-

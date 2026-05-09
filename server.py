@@ -6,6 +6,7 @@ import os
 from collections import Counter, deque
 import re
 from typing import Any, Deque, Dict, Optional, Set, List, Iterator, Callable
+
 from flask import Flask
 from flask_cors import CORS
 import ollama as _ollama
@@ -14,7 +15,9 @@ from ollama import ChatResponse
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
-from gui import select_settings, prompt_input_sample_rate, run_runtime_dashboard, run_with_loading_popup
+
+from gui.gui import select_settings, prompt_input_sample_rate, run_runtime_dashboard, run_with_loading_popup
+from openai_realtime import OpenAIRealtimeTranslator
 from routes import register_routes
 from config import _SYSTEM_PROMPT, _LLM_EMPTY_SENTINELS, _HALLUCINATION_PHRASES
 
@@ -30,10 +33,16 @@ RUNTIME_SUBTITLE_LINES_MAX: int = 120
 RUNTIME_LOG_LINES_MAX: int = 300
 
 USE_OLLAMA_CLEANUP: bool = True
+USE_OPENAI_REALTIME_TRANSLATE: bool = False
 OLLAMA_MODEL: str = "qwen2.5:7b-instruct"
 OLLAMA_CONTEXT_WINDOW: int = 6  # number of recent cleaned segments kept as context
 OLLAMA_OPTIONS: Dict[str, Any] = {"num_gpu": 1}
 RAW_BATCH_SIZE: int = 2  # accumulate this many raw Whisper lines before calling the LLM
+
+OPENAI_REALTIME_MODEL: str = "gpt-realtime-translate"
+OPENAI_API_KEY: str = ""
+OPENAI_OUTPUT_LANGUAGE: str = "es"
+OPENAI_SAFETY_IDENTIFIER: str = ""
 
 SETTINGS_PATH: str = os.path.join(os.path.dirname(__file__), "settings.json")
 
@@ -53,6 +62,11 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "ollama_model": "qwen2.5:7b-instruct",
     "ollama_context_window": 5,
     "ollama_raw_batch_size": 1,
+    "use_openai_realtime_translate": False,
+    "openai_api_key": "",
+    "openai_output_language": "en",
+    "openai_model": "gpt-realtime-translate",
+    "openai_safety_identifier": "",
 }
 
 MODEL_CHOICES: List[str] = ["tiny", "base", "small", "medium", "large-v2", "large-v3", "distil-large-v3"]
@@ -92,10 +106,12 @@ CORS(app)
 
 # OLLAMA stuff
 llm_input_queue: queue.Queue = queue.Queue(maxsize=1)
-subtitle_context: Deque[str] = deque(maxlen=OLLAMA_CONTEXT_WINDOW) # sliding window context
+subtitle_context: Deque[str] = deque(maxlen=OLLAMA_CONTEXT_WINDOW)  # sliding window context
 subtitle_context_lock: threading.Lock = threading.Lock()
 _raw_batch: List[str] = []
 _raw_batch_lock: threading.Lock = threading.Lock()
+
+openai_realtime_client: Optional[OpenAIRealtimeTranslator] = None
 
 def resample_audio(audio_np: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     """
@@ -111,6 +127,8 @@ def resample_audio(audio_np: np.ndarray, src_rate: int, dst_rate: int) -> np.nda
     x_old = np.arange(len(audio_np))
     x_new = np.linspace(0, len(audio_np) - 1, dst_len)
     return np.interp(x_new, x_old, audio_np).astype(np.float32)
+
+
 
 
 def load_settings() -> Dict[str, Any]:
@@ -462,7 +480,7 @@ def publish_audio_activity(chunk_rms: float) -> None:
 
 def audio_callback(indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
     """
-    Callback definition for audio sink. Unload all data into global audio_buffer
+    Callback definition for audio sink. Sends audio to local Whisper buffer or OpenAI realtime queue.
     """
     if status:
         print(f"Audio status: {status}")
@@ -470,6 +488,11 @@ def audio_callback(indata: np.ndarray, frames: int, time_info: Any, status: Any)
     chunk: np.ndarray = indata[:, 0].copy()
     chunk_rms: float = float(np.sqrt(np.mean(np.square(chunk)))) if len(chunk) > 0 else 0.0
     publish_audio_activity(chunk_rms)
+
+    if USE_OPENAI_REALTIME_TRANSLATE:
+        if openai_realtime_client is not None:
+            openai_realtime_client.enqueue_audio_chunk(chunk, CAPTURE_SAMPLE_RATE)
+        return
 
     global audio_buffer
     with lock:
@@ -526,9 +549,12 @@ def select_input_sample_rate(device_index: int, preferred_rate: int) -> int:
 
 def main() -> None:
     global CAPTURE_SAMPLE_RATE, MAX_SAMPLES, model, WHISPER_TASK, WHISPER_BEAM_SIZE, WHISPER_LANGUAGE
-    global BUFFER_SECONDS, PROCESS_INTERVAL_SECONDS, USE_OLLAMA_CLEANUP
+    global BUFFER_SECONDS, PROCESS_INTERVAL_SECONDS, USE_OLLAMA_CLEANUP, USE_OPENAI_REALTIME_TRANSLATE
     global OLLAMA_MODEL, OLLAMA_CONTEXT_WINDOW, RAW_BATCH_SIZE, subtitle_context
     global AUDIO_ACTIVITY_THRESHOLD, last_audio_activity_payload, _audio_active_until, _audio_last_emit
+    global OPENAI_API_KEY, OPENAI_OUTPUT_LANGUAGE, OPENAI_REALTIME_MODEL, OPENAI_SAFETY_IDENTIFIER
+    global openai_realtime_client
+
     start_subtitle_server()
 
     settings: Dict[str, Any] = load_settings()
@@ -545,12 +571,22 @@ def main() -> None:
     )
     save_settings(settings)
 
-    USE_OLLAMA_CLEANUP = bool(settings.get("use_ollama_cleanup", True))
+    USE_OPENAI_REALTIME_TRANSLATE = bool(settings.get("use_openai_realtime_translate", False))
+    OPENAI_REALTIME_MODEL = str(settings.get("openai_model", OPENAI_REALTIME_MODEL)).strip() or OPENAI_REALTIME_MODEL
+    OPENAI_OUTPUT_LANGUAGE = str(settings.get("openai_output_language", "es")).strip() or "es"
+    OPENAI_SAFETY_IDENTIFIER = str(settings.get("openai_safety_identifier", "")).strip()
+    OPENAI_API_KEY = str(settings.get("openai_api_key", "")).strip() or str(os.environ.get("OPENAI_API_KEY", "")).strip()
+
+    USE_OLLAMA_CLEANUP = bool(settings.get("use_ollama_cleanup", True)) and not USE_OPENAI_REALTIME_TRANSLATE
     OLLAMA_OPTIONS["num_gpu"] = 0 if settings.get("ollama_device", "CPU").upper() == "CPU" else 1
-    OLLAMA_MODEL = "qwen2.5:7b-instruct" if str(settings.get("ollama_model", OLLAMA_MODEL)) is None else str(settings.get("ollama_model", OLLAMA_MODEL))
+    OLLAMA_MODEL = str(settings.get("ollama_model", OLLAMA_MODEL)).strip() or OLLAMA_MODEL
     OLLAMA_CONTEXT_WINDOW = int(settings.get("ollama_context_window", 6))
     subtitle_context = deque(maxlen=OLLAMA_CONTEXT_WINDOW)
     RAW_BATCH_SIZE = int(settings.get("ollama_raw_batch_size", 3))
+
+    if USE_OPENAI_REALTIME_TRANSLATE and not OPENAI_API_KEY:
+        raise RuntimeError("OpenAI realtime translation is enabled, but no API key was provided.")
+
     if USE_OLLAMA_CLEANUP:
         run_with_loading_popup(
             title="Preparing Ollama model",
@@ -595,23 +631,12 @@ def main() -> None:
     _audio_last_emit = 0.0
     broadcast_event(SSE_EVENT_AUDIO_ACTIVITY, last_audio_activity_payload)
 
-    model = WhisperModel(model_name, device=whisper_device, compute_type=compute_type)
-
     device_info = sd.query_devices(device_index)
     preferred_rate: int = int(device_info["default_samplerate"])
     if preferred_rate <= 0:
         preferred_rate = 48000
     CAPTURE_SAMPLE_RATE = select_input_sample_rate(device_index, preferred_rate)
     MAX_SAMPLES = int(CAPTURE_SAMPLE_RATE * BUFFER_SECONDS)
-    print(f"Using device {device_index}: {device_info['name']}")
-    print(f"Model: {model_name} | task={WHISPER_TASK} | beam_size={WHISPER_BEAM_SIZE}")
-    print(f"Compute: device={whisper_device} | compute_type={compute_type}")
-    print(f"Capture sample rate: {CAPTURE_SAMPLE_RATE} Hz (resampling to {TARGET_SAMPLE_RATE} Hz)")
-    print(f"Audio activity threshold (RMS): {AUDIO_ACTIVITY_THRESHOLD}")
-    print(f"Ollama cleanup: {'enabled' if USE_OLLAMA_CLEANUP else 'disabled'} (model={OLLAMA_MODEL})")
-
-    processing_thread = threading.Thread(target=processing_loop, daemon=True)
-    processing_thread.start()
 
     with recent_subtitle_lines_lock:
         recent_subtitle_lines.clear()
@@ -620,7 +645,46 @@ def main() -> None:
 
     add_runtime_log("SYSTEM", "Runtime dashboard started")
     add_runtime_log("SYSTEM", f"Device: {device_info['name']} @ {CAPTURE_SAMPLE_RATE} Hz")
-    add_runtime_log("SYSTEM", f"Task={WHISPER_TASK} | Beam={WHISPER_BEAM_SIZE} | Cleanup={'on' if USE_OLLAMA_CLEANUP else 'off'}")
+
+    processing_thread: Optional[threading.Thread] = None
+
+    if USE_OPENAI_REALTIME_TRANSLATE:
+        openai_realtime_client = OpenAIRealtimeTranslator(
+            api_key=OPENAI_API_KEY,
+            model=OPENAI_REALTIME_MODEL,
+            output_language=OPENAI_OUTPUT_LANGUAGE,
+            safety_identifier=OPENAI_SAFETY_IDENTIFIER,
+            add_runtime_log=add_runtime_log,
+            broadcast_subtitle=broadcast_subtitle,
+            resample_audio=resample_audio,
+        )
+        openai_realtime_client.start()
+
+        print(f"Using device {device_index}: {device_info['name']}")
+        print(f"Realtime translation backend: OpenAI ({OPENAI_REALTIME_MODEL})")
+        print(
+            f"Capture sample rate: {CAPTURE_SAMPLE_RATE} Hz "
+            f"(resampling to {openai_realtime_client.target_sample_rate} Hz for OpenAI)"
+        )
+        print(f"Audio activity threshold (RMS): {AUDIO_ACTIVITY_THRESHOLD}")
+        print("Ollama cleanup: disabled (OpenAI realtime translation selected)")
+
+        add_runtime_log("SYSTEM", f"Backend=OpenAI realtime | model={OPENAI_REALTIME_MODEL} | lang={OPENAI_OUTPUT_LANGUAGE}")
+    else:
+        openai_realtime_client = None
+        model = WhisperModel(model_name, device=whisper_device, compute_type=compute_type)
+
+        print(f"Using device {device_index}: {device_info['name']}")
+        print(f"Model: {model_name} | task={WHISPER_TASK} | beam_size={WHISPER_BEAM_SIZE}")
+        print(f"Compute: device={whisper_device} | compute_type={compute_type}")
+        print(f"Capture sample rate: {CAPTURE_SAMPLE_RATE} Hz (resampling to {TARGET_SAMPLE_RATE} Hz)")
+        print(f"Audio activity threshold (RMS): {AUDIO_ACTIVITY_THRESHOLD}")
+        print(f"Ollama cleanup: {'enabled' if USE_OLLAMA_CLEANUP else 'disabled'} (model={OLLAMA_MODEL})")
+
+        add_runtime_log("SYSTEM", f"Task={WHISPER_TASK} | Beam={WHISPER_BEAM_SIZE} | Cleanup={'on' if USE_OLLAMA_CLEANUP else 'off'}")
+
+        processing_thread = threading.Thread(target=processing_loop, daemon=True)
+        processing_thread.start()
 
     stream = sd.InputStream(
         device=device_index,
@@ -644,6 +708,10 @@ def main() -> None:
             on_close=_on_dashboard_close,
         )
     finally:
+        if USE_OPENAI_REALTIME_TRANSLATE and openai_realtime_client is not None:
+            openai_realtime_client.stop()
+            openai_realtime_client = None
+
         try:
             stream.stop()
         except Exception:

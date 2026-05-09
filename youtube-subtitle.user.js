@@ -147,7 +147,7 @@
 
       const footerText = document.createElement("div");
       footerText.id = FOOTER_TEXT_ID;
-      footerText.textContent = "auto live tl - message - drag me";
+      footerText.textContent = "Auto-Live-TL - Machine Translated - no translation should be taken as authoritative or quoted verbatim - (drag me)";
       footerText.style.marginTop = "8px";
       footerText.style.fontSize = "12px";
       footerText.style.opacity = "0.7";

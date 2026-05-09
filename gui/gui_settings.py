@@ -216,7 +216,7 @@ class _SettingsDialog(QDialog):
         openai_tab_layout.addLayout(openai_layout)
 
         self.openai_hint_label = QLabel(
-            "When enabled, source audio is streamed to OpenAI /v1/realtime/translations and subtitle SSE events are produced from realtime transcript output. Ollama cleanup is bypassed.",
+            "When enabled, source audio is streamed to OpenAI /v1/realtime/translations (gpt-realtime-translate) and subtitle SSE events are produced from realtime transcript output. Ollama cleanup is bypassed.",
             openai_tab,
         )
         self.openai_hint_label.setWordWrap(True)
