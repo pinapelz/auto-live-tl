@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-Live-TL YouTube Client
 // @namespace    https://example.com/
-// @version      1.0
+// @version      1.1
 // @description  Auto Translate Live Subtitles
 // @author       pinapelz
 // @match        https://www.youtube.com/*
@@ -16,6 +16,7 @@
   const SUBTITLE_TEXT_ID = "altl-subtitle-text";
   const FOOTER_TEXT_ID = "altl-footer-text";
   const EVENTS_URL = "http://127.0.0.1:5000/events";
+  const PANEL_POSITION_KEY = "altl-subtitle-panel-position-v1";
 
   let eventSource = null;
   let isConnected = false;
@@ -24,28 +25,114 @@
   const MAX_SUBTITLE_LINES = 3;
   const recentLines = [];
 
-  function getPrimary() {
-    return document.querySelector("#columns #primary");
+  function loadPanelPosition() {
+    try {
+      const raw = localStorage.getItem(PANEL_POSITION_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (typeof parsed?.x !== "number" || typeof parsed?.y !== "number") return null;
+      return { x: parsed.x, y: parsed.y };
+    } catch {
+      return null;
+    }
   }
 
-  function getPlayerNode(primary) {
-    return (
-      primary?.querySelector("#player") ||
-      primary?.querySelector("ytd-player") ||
-      primary?.querySelector("#movie_player")?.closest("#player") ||
-      primary?.querySelector("#movie_player") ||
-      null
-    );
+  function savePanelPosition(x, y) {
+    try {
+      localStorage.setItem(PANEL_POSITION_KEY, JSON.stringify({ x, y }));
+    } catch {
+      // ignore storage failures
+    }
   }
 
-  function getTitleAnchor(primary) {
-    return (
-      primary?.querySelector("ytd-watch-metadata") ||
-      primary?.querySelector("#title h1")?.closest("ytd-watch-metadata") ||
-      primary?.querySelector("#below ytd-watch-metadata") ||
-      primary?.querySelector("#below")?.firstElementChild ||
-      null
-    );
+  function clampPanelPosition(panel, x, y) {
+    const margin = 8;
+    const panelWidth = panel.offsetWidth || 600;
+    const panelHeight = panel.offsetHeight || 120;
+
+    const maxX = Math.max(margin, window.innerWidth - panelWidth - margin);
+    const maxY = Math.max(margin, window.innerHeight - panelHeight - margin);
+
+    const clampedX = Math.min(Math.max(margin, x), maxX);
+    const clampedY = Math.min(Math.max(margin, y), maxY);
+
+    return { x: clampedX, y: clampedY };
+  }
+
+  function setPanelPosition(panel, x, y, persist = false) {
+    const pos = clampPanelPosition(panel, x, y);
+    panel.style.left = `${pos.x}px`;
+    panel.style.top = `${pos.y}px`;
+    if (persist) savePanelPosition(pos.x, pos.y);
+  }
+
+  function applyInitialPanelPosition(panel) {
+    const saved = loadPanelPosition();
+    if (saved) {
+      setPanelPosition(panel, saved.x, saved.y, false);
+      return;
+    }
+
+    // Default position: near the top-center.
+    const defaultX = Math.max(12, Math.round((window.innerWidth - panel.offsetWidth) / 2));
+    const defaultY = 80;
+    setPanelPosition(panel, defaultX, defaultY, false);
+  }
+
+  function makePanelDraggable(panel, handle) {
+    if (!panel || !handle || panel.dataset.dragReady === "1") return;
+
+    panel.dataset.dragReady = "1";
+
+    let dragging = false;
+    let dragOffsetX = 0;
+    let dragOffsetY = 0;
+
+    handle.style.cursor = "move";
+
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      dragging = true;
+      handle.setPointerCapture(event.pointerId);
+
+      const rect = panel.getBoundingClientRect();
+      dragOffsetX = event.clientX - rect.left;
+      dragOffsetY = event.clientY - rect.top;
+
+      panel.style.transition = "none";
+      event.preventDefault();
+    });
+
+    handle.addEventListener("pointermove", (event) => {
+      if (!dragging) return;
+      const nextX = event.clientX - dragOffsetX;
+      const nextY = event.clientY - dragOffsetY;
+      setPanelPosition(panel, nextX, nextY, false);
+    });
+
+    function endDrag(event) {
+      if (!dragging) return;
+      dragging = false;
+      try {
+        handle.releasePointerCapture(event.pointerId);
+      } catch {
+        // ignored
+      }
+      panel.style.transition = "";
+
+      const left = parseFloat(panel.style.left || "0");
+      const top = parseFloat(panel.style.top || "0");
+      setPanelPosition(panel, left, top, true);
+    }
+
+    handle.addEventListener("pointerup", endDrag);
+    handle.addEventListener("pointercancel", endDrag);
+
+    window.addEventListener("resize", () => {
+      const left = parseFloat(panel.style.left || "0");
+      const top = parseFloat(panel.style.top || "0");
+      setPanelPosition(panel, left, top, true);
+    });
   }
 
   function ensurePanel() {
@@ -60,23 +147,27 @@
 
       const footerText = document.createElement("div");
       footerText.id = FOOTER_TEXT_ID;
-      footerText.textContent = "Machine Translated - no translation should be taken as authoritative or quoted verbatim";
+      footerText.textContent = "auto live tl - message - drag me";
       footerText.style.marginTop = "8px";
       footerText.style.fontSize = "12px";
       footerText.style.opacity = "0.7";
       footerText.style.textAlign = "center";
+      footerText.style.userSelect = "none";
 
       panel.appendChild(subtitleText);
       panel.appendChild(footerText);
 
+      panel.style.position = "fixed";
       panel.style.display = "block";
       panel.style.boxSizing = "border-box";
-      panel.style.width = "100%";
-      panel.style.margin = "8px 0 12px";
+      panel.style.width = "min(76vw, 960px)";
+      panel.style.minWidth = "320px";
+      panel.style.maxWidth = "960px";
+      panel.style.margin = "0";
       panel.style.padding = "10px 14px";
       panel.style.borderRadius = "10px";
-      panel.style.background = "rgba(255,255,255,0.04)";
-      panel.style.border = "1px solid rgba(255,255,255,0.12)";
+      panel.style.background = "rgba(0,0,0,0.62)";
+      panel.style.border = "1px solid rgba(255,255,255,0.18)";
       panel.style.color = "var(--yt-spec-text-primary, #f1f1f1)";
       panel.style.fontSize = "16px";
       panel.style.lineHeight = "1.45";
@@ -84,6 +175,14 @@
       panel.style.textAlign = "center";
       panel.style.whiteSpace = "pre-wrap";
       panel.style.wordBreak = "break-word";
+      panel.style.zIndex = "2147483646";
+      panel.style.backdropFilter = "blur(3px)";
+
+      document.body.appendChild(panel);
+      applyInitialPanelPosition(panel);
+      makePanelDraggable(panel, footerText);
+    } else if (!panel.isConnected) {
+      document.body.appendChild(panel);
     }
     return panel;
   }
@@ -92,14 +191,10 @@
     return panel?.querySelector(`#${SUBTITLE_TEXT_ID}`) || null;
   }
 
-
-
   function setSubtitleText(panel, text) {
     const node = getSubtitleNode(panel);
     if (node) node.textContent = text;
   }
-
-
 
   function renderSubtitleHistory(panel) {
     const node = getSubtitleNode(panel);
@@ -128,27 +223,6 @@
     renderSubtitleHistory(panel);
   }
 
-  function safePlaceBefore(targetNode, nodeToPlace) {
-    if (!targetNode || !targetNode.parentNode || !targetNode.isConnected) return false;
-
-    const parent = targetNode.parentNode;
-    if (nodeToPlace.parentNode !== parent || nodeToPlace.nextSibling !== targetNode) {
-      parent.insertBefore(nodeToPlace, targetNode);
-    }
-    return true;
-  }
-
-  function safePlaceAfter(targetNode, nodeToPlace) {
-    if (!targetNode || !targetNode.parentNode || !targetNode.isConnected) return false;
-
-    const parent = targetNode.parentNode;
-    const desiredNext = targetNode.nextSibling;
-    if (nodeToPlace.parentNode !== parent || nodeToPlace.previousSibling !== targetNode) {
-      parent.insertBefore(nodeToPlace, desiredNext);
-    }
-    return true;
-  }
-
   function connectEventSource(panel) {
     if (eventSource) {
       eventSource.close();
@@ -168,8 +242,6 @@
         console.warn("Auto-Live-TL: failed to parse subtitle event", err);
       }
     });
-
-
 
     source.onopen = () => {
       isConnected = true;
@@ -205,18 +277,9 @@
   function injectSubtitlePanel() {
     if (!location.pathname.startsWith("/watch")) return false;
 
-    const primary = getPrimary();
-    if (!primary) return false;
-
     const panel = ensurePanel();
-
     startListeningIfNeeded(panel);
-    const titleAnchor = getTitleAnchor(primary);
-    if (safePlaceBefore(titleAnchor, panel)) return true;
-    const playerNode = getPlayerNode(primary);
-    if (safePlaceAfter(playerNode, panel)) return true;
-
-    return false;
+    return true;
   }
 
   injectSubtitlePanel();
