@@ -6,7 +6,7 @@ import time
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout
 
-from gui.gui.gui_common import ensure_qt_app
+from gui.gui_common import ensure_qt_app
 
 
 T = TypeVar("T")
