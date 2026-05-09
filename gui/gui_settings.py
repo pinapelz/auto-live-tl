@@ -1,11 +1,10 @@
-from typing import Iterable, List, Tuple, Dict, Any, Callable, cast, Optional
+from typing import Iterable, List, Tuple, Dict, Any, Optional
 import time
+
 import numpy as np
 import sounddevice as sd
-from PySide6.QtGui import QFont
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -18,10 +17,12 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QTabWidget,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+
+from gui.gui_common import ensure_qt_app
+
 
 class _SettingsDialog(QDialog):
     def __init__(
@@ -184,6 +185,46 @@ class _SettingsDialog(QDialog):
         ollama_tab_layout.addWidget(ollama_advanced_group)
         tabs.addTab(ollama_tab, "Ollama")
 
+        # OpenAI Realtime tab
+        openai_tab = QWidget(self)
+        openai_tab_layout = QVBoxLayout(openai_tab)
+
+        openai_layout = QFormLayout()
+        openai_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        self.use_openai_realtime_checkbox = QCheckBox(openai_tab)
+        self.use_openai_realtime_checkbox.setChecked(bool(get_value("use_openai_realtime_translate", False)))
+        openai_layout.addRow(QLabel("Use OpenAI realtime translation:"), self.use_openai_realtime_checkbox)
+
+        self.openai_api_key_edit = QLineEdit(str(get_value("openai_api_key", "")), openai_tab)
+        self.openai_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.openai_api_key_edit.setPlaceholderText("sk-...")
+        openai_layout.addRow(QLabel("OpenAI API key:"), self.openai_api_key_edit)
+
+        self.openai_output_language_edit = QLineEdit(str(get_value("openai_output_language", "es")), openai_tab)
+        self.openai_output_language_edit.setPlaceholderText("es")
+        openai_layout.addRow(QLabel("Target language code:"), self.openai_output_language_edit)
+
+        self.openai_model_edit = QLineEdit(str(get_value("openai_model", "gpt-realtime-translate")), openai_tab)
+        self.openai_model_edit.setPlaceholderText("gpt-realtime-translate")
+        openai_layout.addRow(QLabel("Realtime model:"), self.openai_model_edit)
+
+        self.openai_safety_identifier_edit = QLineEdit(str(get_value("openai_safety_identifier", "")), openai_tab)
+        self.openai_safety_identifier_edit.setPlaceholderText("optional hashed-user-id")
+        openai_layout.addRow(QLabel("OpenAI-Safety-Identifier (optional):"), self.openai_safety_identifier_edit)
+
+        openai_tab_layout.addLayout(openai_layout)
+
+        self.openai_hint_label = QLabel(
+            "When enabled, source audio is streamed to OpenAI /v1/realtime/translations and subtitle SSE events are produced from realtime transcript output. Ollama cleanup is bypassed.",
+            openai_tab,
+        )
+        self.openai_hint_label.setWordWrap(True)
+        self.openai_hint_label.setStyleSheet("font-size: 12px; color: #9aa0a6;")
+        openai_tab_layout.addWidget(self.openai_hint_label)
+
+        tabs.addTab(openai_tab, "OpenAI Realtime")
+
         button_layout = QHBoxLayout()
         root_layout.addLayout(button_layout)
         button_box = QDialogButtonBox(
@@ -196,6 +237,7 @@ class _SettingsDialog(QDialog):
 
         self.device_combo.currentIndexChanged.connect(self._restart_monitor_stream)
         self.audio_activity_threshold_edit.textChanged.connect(self._on_threshold_changed)
+        self.use_openai_realtime_checkbox.toggled.connect(self._sync_backend_controls)
 
         self._monitor_timer = QTimer(self)
         self._monitor_timer.setInterval(120)
@@ -203,6 +245,7 @@ class _SettingsDialog(QDialog):
         self._monitor_timer.start()
 
         self._restart_monitor_stream()
+        self._sync_backend_controls(self.use_openai_realtime_checkbox.isChecked())
         self._refresh_audio_indicator()
 
     def _warn(self, title: str, text: str) -> None:
@@ -215,6 +258,21 @@ class _SettingsDialog(QDialog):
                 self._monitor_threshold = parsed
         except ValueError:
             pass
+
+    def _sync_backend_controls(self, use_openai: bool) -> None:
+        self.openai_api_key_edit.setEnabled(use_openai)
+        self.openai_output_language_edit.setEnabled(use_openai)
+        self.openai_model_edit.setEnabled(use_openai)
+        self.openai_safety_identifier_edit.setEnabled(use_openai)
+
+        self.use_ollama_cleanup_checkbox.setEnabled(not use_openai)
+        self.ollama_device_combo.setEnabled(not use_openai)
+        self.ollama_model_edit.setEnabled(not use_openai)
+        self.ollama_context_edit.setEnabled(not use_openai)
+        self.ollama_batch_edit.setEnabled(not use_openai)
+
+        if use_openai:
+            self.use_ollama_cleanup_checkbox.setChecked(False)
 
     def _pick_monitor_sample_rate(self, device_index: int, preferred_rate: int) -> Optional[int]:
         common_rates: List[int] = [48000, 44100, 32000, 24000, 22050, 16000, 12000, 8000]
@@ -372,6 +430,19 @@ class _SettingsDialog(QDialog):
             self._warn("Invalid batch size", "Batch size must be a positive integer.")
             return
 
+        use_openai_realtime = self.use_openai_realtime_checkbox.isChecked()
+        openai_api_key = self.openai_api_key_edit.text().strip()
+        openai_output_language = self.openai_output_language_edit.text().strip()
+        openai_model = self.openai_model_edit.text().strip() or "gpt-realtime-translate"
+        openai_safety_identifier = self.openai_safety_identifier_edit.text().strip()
+
+        if use_openai_realtime and not openai_api_key:
+            self._warn("OpenAI API key required", "Please provide your OpenAI API key to use realtime translation.")
+            return
+        if use_openai_realtime and not openai_output_language:
+            self._warn("Target language required", "Please provide a target language code (example: es, fr, ja).")
+            return
+
         self.selected_settings = {
             "audio_device_name": self.device_names[selection],
             "model_name": model_name,
@@ -383,11 +454,16 @@ class _SettingsDialog(QDialog):
             "context_seconds": context_seconds,
             "update_interval_seconds": update_interval_seconds,
             "audio_activity_threshold": audio_activity_threshold,
-            "use_ollama_cleanup": self.use_ollama_cleanup_checkbox.isChecked(),
+            "use_ollama_cleanup": self.use_ollama_cleanup_checkbox.isChecked() and not use_openai_realtime,
             "ollama_device": self.ollama_device_combo.currentText(),
             "ollama_model": self.ollama_model_edit.text().strip(),
             "ollama_context_window": ollama_context_window,
             "ollama_raw_batch_size": ollama_raw_batch_size,
+            "use_openai_realtime_translate": use_openai_realtime,
+            "openai_api_key": openai_api_key,
+            "openai_output_language": openai_output_language or "es",
+            "openai_model": openai_model,
+            "openai_safety_identifier": openai_safety_identifier,
         }
         self._monitor_timer.stop()
         self._stop_monitor_stream()
@@ -411,11 +487,7 @@ def select_settings(
     if not input_devices:
         raise RuntimeError("No audio input devices found.")
 
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    app = cast(QApplication, app)
-    app.setFont(QFont("Calibri", 12))
+    ensure_qt_app()
 
     dialog = _SettingsDialog(
         settings=settings,
@@ -433,186 +505,8 @@ def select_settings(
     return dialog.selected_settings
 
 
-AudioActivityProvider = Callable[[], Dict[str, Any]]
-RuntimeLogLinesProvider = Callable[[], List[str]]
-SubtitleLinesProvider = Callable[[], List[str]]
-
-
-class _RuntimeDashboard(QWidget):
-    def __init__(
-        self,
-        get_audio_activity: AudioActivityProvider,
-        get_runtime_logs: RuntimeLogLinesProvider,
-        get_subtitle_lines: SubtitleLinesProvider,
-        on_close: Callable[[], None],
-    ) -> None:
-        super().__init__()
-        self._get_audio_activity = get_audio_activity
-        self._get_runtime_logs = get_runtime_logs
-        self._get_subtitle_lines = get_subtitle_lines
-        self._on_close = on_close
-        self._closed = False
-        self._last_rendered_runtime_logs: str = ""
-        self._last_rendered_final_logs: str = ""
-
-        self.setWindowTitle("auto-live-tl")
-        self.setMinimumSize(1100, 700)
-
-        layout = QVBoxLayout(self)
-
-        title = QLabel("auto-live-tl", self)
-        title.setStyleSheet("font-size: 22px; font-weight: 700; color: #000000;")
-        layout.addWidget(title)
-
-        self.audio_indicator = QLabel("⚪ Idle", self)
-        self.audio_indicator.setStyleSheet("font-size: 16px; color: #b0b0b0; font-weight: 600;")
-        layout.addWidget(self.audio_indicator)
-
-        self.audio_details = QLabel("RMS 0.00000 | threshold 0.00300", self)
-        self.audio_details.setStyleSheet("font-size: 13px; color: #9aa0a6;")
-        layout.addWidget(self.audio_details)
-
-        raw_group = QGroupBox("Debug Log (It's recommended to fetch the final data via the SSE API, see the README)", self)
-        raw_group_layout = QVBoxLayout(raw_group)
-
-        raw_title = QLabel("System / Raw Output", raw_group)
-        raw_group_layout.addWidget(raw_title)
-
-        self.runtime_log_view = QTextEdit(raw_group)
-        self.runtime_log_view.setReadOnly(True)
-        self.runtime_log_view.setPlaceholderText("Waiting for raw Whisper output...")
-        self.runtime_log_view.setStyleSheet(
-            """
-            QTextEdit {
-                background: #111417;
-                color: #d8dee9;
-                border: 1px solid #2f3742;
-                border-radius: 8px;
-                padding: 8px;
-                font-family: 'Consolas', 'Monaco', monospace;
-                font-size: 13px;
-                line-height: 1.4;
-            }
-            """
-        )
-        raw_group_layout.addWidget(self.runtime_log_view, 3)
-
-        final_title = QLabel("Final (Sent via SSE)", raw_group)
-        raw_group_layout.addWidget(final_title)
-
-        self.final_log_view = QTextEdit(raw_group)
-        self.final_log_view.setReadOnly(True)
-        self.final_log_view.setPlaceholderText("Waiting for FINAL output...")
-        self.final_log_view.setStyleSheet(
-            """
-            QTextEdit {
-                background: #0f1410;
-                color: #dcf9dd;
-                border: 1px solid #2f4a35;
-                border-radius: 8px;
-                padding: 8px;
-                font-family: 'Consolas', 'Monaco', monospace;
-                font-size: 14px;
-                font-weight: 700;
-                line-height: 1.6;
-            }
-            """
-        )
-        raw_group_layout.addWidget(self.final_log_view, 2)
-
-        layout.addWidget(raw_group, 1)
-
-        self._timer = QTimer(self)
-        self._timer.setInterval(150)
-        self._timer.timeout.connect(self._refresh)
-        self._timer.start()
-        self._refresh()
-
-    def _shutdown(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._timer.stop()
-        try:
-            self._on_close()
-        except Exception:
-            pass
-
-    def closeEvent(self, event: Any) -> None:  # type: ignore[override]
-        self._shutdown()
-        super().closeEvent(event)
-
-    def _refresh(self) -> None:
-        try:
-            activity = self._get_audio_activity()
-        except Exception:
-            activity = {}
-
-        active = bool(activity.get("active", False))
-        try:
-            rms = float(activity.get("rms", 0.0))
-        except (TypeError, ValueError):
-            rms = 0.0
-        try:
-            threshold = float(activity.get("threshold", 0.0))
-        except (TypeError, ValueError):
-            threshold = 0.0
-
-        if active:
-            self.audio_indicator.setText("🟢 Audio detected")
-            self.audio_indicator.setStyleSheet("font-size: 16px; color: #8fd18f; font-weight: 600;")
-        else:
-            self.audio_indicator.setText("⚪ Idle")
-            self.audio_indicator.setStyleSheet("font-size: 16px; color: #b0b0b0; font-weight: 600;")
-        self.audio_details.setText(f"RMS {rms:.5f} | threshold {threshold:.5f}")
-
-        try:
-            logs = self._get_runtime_logs()
-        except Exception:
-            logs = []
-        runtime_lines = [line for line in logs if "[FINAL]" not in line]
-        final_lines = [line for line in logs if "[FINAL]" in line]
-
-        joined_runtime_logs = "\n".join(runtime_lines)
-        if joined_runtime_logs != self._last_rendered_runtime_logs:
-            self._last_rendered_runtime_logs = joined_runtime_logs
-            self.runtime_log_view.setPlainText(joined_runtime_logs)
-            log_scroll = self.runtime_log_view.verticalScrollBar()
-            log_scroll.setValue(log_scroll.maximum())
-
-        joined_final_logs = "\n\n".join(final_lines)
-        if joined_final_logs != self._last_rendered_final_logs:
-            self._last_rendered_final_logs = joined_final_logs
-            self.final_log_view.setPlainText(joined_final_logs)
-            final_scroll = self.final_log_view.verticalScrollBar()
-            final_scroll.setValue(final_scroll.maximum())
-
-
-
-
-def run_runtime_dashboard(
-    get_audio_activity: AudioActivityProvider,
-    get_runtime_logs: RuntimeLogLinesProvider,
-    get_subtitle_lines: SubtitleLinesProvider,
-    on_close: Callable[[], None],
-) -> None:
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    app = cast(QApplication, app)
-    app.setFont(QFont("Calibri", 12))
-
-    dashboard = _RuntimeDashboard(
-        get_audio_activity=get_audio_activity,
-        get_runtime_logs=get_runtime_logs,
-        get_subtitle_lines=get_subtitle_lines,
-        on_close=on_close,
-    )
-    dashboard.show()
-    app.exec()
-
-
 def prompt_input_sample_rate(device_index: int, common_rates: Iterable[int]) -> int:
+    ensure_qt_app()
     rates = list(common_rates)
     while True:
         prompt = (

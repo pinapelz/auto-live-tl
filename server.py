@@ -5,7 +5,7 @@ import queue
 import os
 from collections import Counter, deque
 import re
-from typing import Any, Deque, Dict, Optional, Set, List, Iterator
+from typing import Any, Deque, Dict, Optional, Set, List, Iterator, Callable
 from flask import Flask
 from flask_cors import CORS
 import ollama as _ollama
@@ -14,7 +14,7 @@ from ollama import ChatResponse
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
-from gui import select_settings, prompt_input_sample_rate, run_runtime_dashboard
+from gui import select_settings, prompt_input_sample_rate, run_runtime_dashboard, run_with_loading_popup
 from routes import register_routes
 from config import _SYSTEM_PROMPT, _LLM_EMPTY_SENTINELS, _HALLUCINATION_PHRASES
 
@@ -162,34 +162,42 @@ def cleanup_subtitle_with_ollama(raw_text: str, context: List[str]) -> Optional[
         return None
 
 
-def ensure_ollama_ready() -> None:
+def ensure_ollama_ready(status_callback: Optional[Callable[[str], None]] = None) -> None:
     """
     Pulls Ollama model is necessary, checks model is downloaded
     """
+    def report(message: str) -> None:
+        print(message)
+        if status_callback is not None:
+            status_callback(message.strip())
+
+    report("Checking Ollama server availability...")
     try:
         local = _ollama.list()
     except Exception as exc:
         raise RuntimeError(
             f"Cannot reach Ollama — is the server running?  ({exc})"
         ) from exc
+
     model_names: List[str] = [m.model for m in local.models]
     if not any(name.startswith(OLLAMA_MODEL) for name in model_names):
-        print(f"   '{OLLAMA_MODEL}' not found locally — pulling (this may take a while) ...")
+        report(f"Model '{OLLAMA_MODEL}' not found locally. Pulling now (this can take a while)...")
         try:
             _ollama.pull(OLLAMA_MODEL)
-            print("   Pull complete.")
+            report("Model pull complete.")
         except Exception as exc:
             raise RuntimeError(f"Failed to pull model '{OLLAMA_MODEL}': {exc}") from exc
     else:
-        print(f"   Model found locally.")
-    print("   Warming up model, almost done ...")
+        report("Model found locally.")
+
+    report("Warming up Ollama model...")
     try:
         chat(
             model=OLLAMA_MODEL,
             messages=[{"role": "user", "content": "Ready?"}],
             options=OLLAMA_OPTIONS,
         )
-        print("   ✅ Ollama is ready.")
+        report("✅ Ollama is ready.")
     except Exception as exc:
         raise RuntimeError(f"Ollama warm-up failed: {exc}") from exc
 
@@ -544,7 +552,11 @@ def main() -> None:
     subtitle_context = deque(maxlen=OLLAMA_CONTEXT_WINDOW)
     RAW_BATCH_SIZE = int(settings.get("ollama_raw_batch_size", 3))
     if USE_OLLAMA_CLEANUP:
-        ensure_ollama_ready()
+        run_with_loading_popup(
+            title="Preparing Ollama model",
+            initial_message="Checking model availability...",
+            task=ensure_ollama_ready,
+        )
         llm_thread = threading.Thread(target=llm_processing_loop, daemon=True)
         llm_thread.start()
 
