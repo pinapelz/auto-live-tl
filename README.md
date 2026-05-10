@@ -1,28 +1,28 @@
 # auto-live-tl
-A basic LOCAL translation backend that listens to an audio sink via PCM and runs translation via faster-whisper. Also supports the option to use `qwen2.5-7b-instruct` (can be changed but has to be edited in the source code) to format/clean-up subtitles based on sliding window context.
+A translation backend that listens to an audio sink via PCM and produces translations in real time.
+- **Whisper + optional Ollama cleanup**
+  - Runs locally via CUDA or CPU. Follow "Local Setup" instructions
+- **OpenAI Realtime translation** using `gpt-realtime-translate` (requires OpenAI API Key, billed usage)
+  - This bypasses `faster-whisper` and `ollama`, in this use case auto-live-tl only serves to encode PCM data into the appropriate format for `gpt-realtime-translate`
 
 Translations and trascriptions are transformers based, inaccuracies and hallucinations will occur.
 
-# Setup
-> It's highly recommended that you run this with a GPU, running with CPU is possible but inference will be very slow outside of using tiny models (which compromise accuracy)
->
-> For this, you will need to install a Nvidia CUDA 12 toolkit. I am running with [CUDA Toolkit 12.9](https://developer.nvidia.com/cuda-12-9-0-download-archive)
-
+# General Setup
 ```
 uv sync
 uv run server.py
 ```
-A GUI is available for configuration
 
-`server.py` serves a backend for translating incoming audio data. It expects some other client to hit the `/events` endpoint to fetch the translated data.
+`server.py` serves a backend for translating incoming audio data. It expects some other client to hit the `/events` endpoint to fetch the translated data. A GUI is available for configuration
 
-## Translation backends
+# Whisper + Ollama (Local Setup)
+> It's highly recommended that you run this with a GPU, running with CPU is possible but inference will be very slow outside of using tiny models (which compromise accuracy)
+>
+> For this, you will need to install a Nvidia CUDA 12 toolkit. I am running with [CUDA Toolkit 12.9](https://developer.nvidia.com/cuda-12-9-0-download-archive)
 
-You can now choose between two subtitle backends in the settings dialog:
 
-- **Whisper + optional Ollama cleanup**
-- **OpenAI Realtime translation** using `gpt-realtime-translate` (requires OpenAI API Key, billed usage)
-  - This bypasses `faster-whisper` and `ollama`, in this use case auto-live-tl only serves to encode PCM data into the appropriate format for `gpt-realtime-translate`
+# OpenAI gpt-realtime-translate (Setup)
+Enabling this option in the GUI will ignore pulling whisper and ollama models, and most settings. All data will be sent to OpenAI.
 
 
 # Clients:
