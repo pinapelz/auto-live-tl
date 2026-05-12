@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QVBoxLayout,
     QWidget,
+    QDoubleSpinBox
 )
 
 from gui.gui_common import ensure_qt_app
@@ -138,7 +139,13 @@ class _SettingsDialog(QDialog):
         self.update_interval_edit = QLineEdit(str(get_value("update_interval_seconds", 2)), whisper_tab)
         whisper_advanced_layout.addRow(QLabel("Update interval (s):"), self.update_interval_edit)
 
-        self.audio_activity_threshold_edit = QLineEdit(str(get_value("audio_activity_threshold", 0.003)), whisper_tab)
+        self.audio_activity_threshold_edit = QDoubleSpinBox(whisper_tab)
+        self.audio_activity_threshold_edit.setDecimals(3)
+        self.audio_activity_threshold_edit.setSingleStep(0.001)
+        self.audio_activity_threshold_edit.setRange(0.0, 999999.0)
+        self.audio_activity_threshold_edit.setValue(
+            float(get_value("audio_activity_threshold", 0.003))
+        )
         whisper_advanced_layout.addRow(QLabel("Audio activity threshold (RMS):"), self.audio_activity_threshold_edit)
 
         self.audio_indicator_label = QLabel("⚪ Idle", whisper_tab)
