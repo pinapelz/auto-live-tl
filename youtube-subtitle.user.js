@@ -4,7 +4,6 @@
 // @version      1.1
 // @description  Auto Translate Live Subtitles
 // @author       pinapelz
-// @match        https://www.youtube.com/*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -260,10 +259,23 @@
         eventSource = null;
       }
       if (!reconnectTimer) {
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
+        let attemptsLeft = 3;
+        const tryReconnect = () => {
+          if (attemptsLeft <= 0) {
+            reconnectTimer = null;
+            setSubtitleText(panel, "Connection lost. Gave up after 3 attempts.");
+            return;
+          }
+          attemptsLeft -= 1;
           connectEventSource(panel);
-        }, 2000);
+
+          if (!isConnected) {
+            reconnectTimer = setTimeout(tryReconnect, 2000);
+          } else {
+            reconnectTimer = null;
+          }
+        };
+        reconnectTimer = setTimeout(tryReconnect, 2000);
       }
     };
   }
